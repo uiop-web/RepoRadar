@@ -1,57 +1,138 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RepoRadar</title>
+<title>RepoRadar 2.0</title>
 <style>
-body{background:#10131c;color:white;font-family:Arial,sans-serif;padding:25px;max-width:650px;margin:auto}
+*{box-sizing:border-box}
+body{margin:0;background:#10131c;color:#fff;font-family:Arial,sans-serif;padding:25px;max-width:720px;margin:auto}
 h1{color:#70a5ff;font-size:38px}
-p{color:#b8c2d8}
-input,button{padding:14px;border-radius:9px;border:0;font-size:16px;margin:6px 0;width:100%;box-sizing:border-box}
-button{background:#3978f6;color:white;font-weight:bold}
-#result{background:#20283a;padding:18px;border-radius:12px;margin-top:20px;white-space:pre-wrap}
+p{color:#b8c2d8;line-height:1.6}
+input,button{padding:15px;border-radius:9px;border:0;font-size:16px;margin:7px 0;width:100%}
+input{background:#20283a;color:white;border:1px solid #45516a}
+button{background:#3978f6;color:white;font-weight:bold;cursor:pointer}
+.card{background:#20283a;padding:18px;border-radius:12px;margin-top:16px}
+.score{font-size:42px;font-weight:bold;color:#70a5ff}
+.item{padding:10px 0;border-bottom:1px solid #39445a}
+.small{font-size:13px;color:#aebbd2}
 </style>
 </head>
 <body>
-<h1>🔎 RepoRadar</h1>
-<p>Discover what's really happening inside a GitHub repository.</p>
+<h1>🔎 RepoRadar <span class="small">2.0</span></h1>
+<p>Discover repository health. Find warning signs. Get roasted by the facts.</p>
+
 <input id="repo" placeholder="owner/repository">
-<button onclick="analyze()">Analyze repository</button>
-<div id="result">Your repository report will appear here.</div>
+<button id="scan" onclick="analyze()">Analyze repository</button>
+<div id="result" class="card">Your repository report will appear here.</div>
 
 <script>
+const api="https://api.github.com";
+
+async function get(url){
+ const r=await fetch(url);
+ if(!r.ok) throw new Error("GitHub API error: "+r.status);
+ return r.json();
+}
+
 async function analyze(){
  const name=document.getElementById("repo").value.trim();
  const out=document.getElementById("result");
- if(!/^[^/]+\/[^/]+$/.test(name)){
-  out.textContent="Enter a repository as owner/name.";
+ const btn=document.getElementById("scan");
+
+ if(!/^[^/\s]+\/[^/\s]+$/.test(name)){
+  out.textContent="Please enter a repository as owner/name.";
   return;
  }
- out.textContent="Scanning repository...";
+
+ btn.disabled=true;
+ btn.textContent="Scanning...";
+ out.textContent="Checking repository information...";
+
  try{
-  const response=await fetch("https://api.github.com/repos/"+name);
-  if(!response.ok) throw new Error("Repository not found or API limit reached.");
-  const r=await response.json();
-  const age=(Date.now()-new Date(r.updated_at).getTime())/86400000;
+  const r=await get(api+"/repos/"+name);
+  const [root,commits,releases]=await Promise.all([
+   get(api+"/repos/"+name+"/contents/"),
+   get(api+"/repos/"+name+"/commits?per_page=1"),
+   get(api+"/repos/"+name+"/releases?per_page=1")
+  ]);
+
+  const files=root.map(x=>x.name.toLowerCase());
+  const hasReadme=files.some(x=>x.startsWith("readme"));
+  const hasLicense=files.some(x=>x.startsWith("license")||x.startsWith("licence"));
+  const hasContributing=files.some(x=>x.startsWith("contributing"));
+  const hasTests=files.some(x=>x.includes("test")||x.includes("spec"));
+  const hasWorkflow=files.includes(".github");
+
+  const age=(Date.now()-new Date(r.pushed_at||r.updated_at))/86400000;
+  const latest=commits[0]?.commit?.committer?.date;
+  const commitAge=latest?(Date.now()-new Date(latest))/86400000:9999;
+
   let score=100;
-  if(age>365) score-=35;
-  else if(age>90) score-=15;
-  if(r.stargazers_count<10) score-=10;
-  if(r.description===null) score-=10;
-  score=Math.max(0,score);
-  let roast=age>365?"This repository has been taking a very long nap.":age>90?"The activity is getting a little quiet.":"This repository is showing signs of life!";
-  out.textContent=
-   "📡 REPORADAR REPORT\n\n"+
-   "Repository: "+r.full_name+"\n"+
-   "⭐ Stars: "+r.stargazers_count+"\n"+
-   "🍴 Forks: "+r.forks_count+"\n"+
-   "🐛 Open issues: "+r.open_issues_count+"\n"+
-   "📅 Last updated: "+new Date(r.updated_at).toDateString()+"\n\n"+
-   "💯 CODE HEALTH SCORE: "+score+"/100\n\n"+
-   "🔥 REPO ROAST:\n"+roast+
-   "\n\nNote: This is an early activity-based score, not a full code review.";
- }catch(e){out.textContent="⚠️ "+e.message;}
+  const findings=[];
+
+  function check(ok,points,good,bad){
+   if(ok){findings.push("✅ "+good);}
+   else{score-=points;findings.push("⚠️ "+bad);}
+  }
+
+  check(hasReadme,15,"README found","No README detected");
+  check(hasLicense,15,"Licence file found","No licence file detected");
+  check(hasContributing,10,"Contribution guide found","No contribution guide detected");
+  check(hasTests,15,"Possible test directory found","No obvious test directory found");
+  check(hasWorkflow,10,"GitHub configuration directory found","No .github directory detected");
+
+  if(commitAge<=30)findings.push("✅ Recent commit activity");
+  else if(commitAge<=180){score-=10;findings.push("⚠️ Last commit was over 30 days ago");}
+  else{score-=20;findings.push("⚠️ Last commit was over 180 days ago");}
+
+  if(r.archived){score-=25;findings.push("⚠️ Repository is archived");}
+  if(r.open_issues_count>100){score-=5;findings.push("⚠️ Large number of open issues");}
+  if(!releases.length){score-=5;findings.push("⚠️ No published releases detected");}
+  else{findings.push("✅ At least one published release");}
+
+  score=Math.max(0,Math.min(100,score));
+
+  const problems=findings.filter(x=>x.startsWith("⚠️"));
+  let roast="A respectable repository. The radar has no major complaints today.";
+  if(problems.length>=5)roast="This repository needs a maintenance meeting. Bring snacks. 🍿";
+  else if(problems.length>=3)roast="The codebase has a few things it would rather not discuss. 👀";
+  else if(problems.length>=1)roast="Not bad, but the radar has receipts. 🧾";
+
+  out.innerHTML=`
+   <h2>📡 REPORADAR REPORT</h2>
+   <h3>${r.full_name}</h3>
+   <div class="score">${score}/100</div>
+   <p>Repository maintenance score</p>
+   <div class="item">⭐ Stars: ${r.stargazers_count.toLocaleString()}</div>
+   <div class="item">🍴 Forks: ${r.forks_count.toLocaleString()}</div>
+   <div class="item">🐛 Open issues: ${r.open_issues_count.toLocaleString()}</div>
+   <div class="item">📅 Last pushed: ${new Date(r.pushed_at||r.updated_at).toDateString()}</div>
+   <h3>🔍 Findings</h3>
+   ${findings.map(x=>`<div class="item">${x}</div>`).join("")}
+   <h3>🔥 REPO ROAST</h3>
+   <p>${roast}</p>
+   <p class="small">This is a preliminary maintenance assessment based on public repository metadata and root-level files. It does not inspect code quality or verify test coverage.</p>
+   <button onclick="shareReport('${r.full_name}',${score})">Share result</button>
+  `;
+ }catch(e){
+  out.textContent="⚠️ "+e.message+". Check the repository name or try again later.";
+ }finally{
+  btn.disabled=false;
+  btn.textContent="Analyze repository";
+ }
+}
+
+function shareReport(name,score){
+ const text="RepoRadar scored "+name+" "+score+"/100. Check your repository!";
+ if(navigator.share){
+  navigator.share({title:"RepoRadar report",text:text}).catch(()=>{});
+ }else if(navigator.clipboard){
+  navigator.clipboard.writeText(text).then(()=>alert("Report copied!"));
+ }else{
+  alert(text);
+ }
 }
 </script>
 </body>
